@@ -10,14 +10,13 @@ import urllib.request
 
 LOGGER = logging.getLogger(__name__)
 
-# OrcaSlicer reads filament per slot from Moonraker's lane_data namespace. On the
-# AD5X, HelixScreen and SpoolSync already keep "lane1".."lane4" there, so the
-# same keys are used and only color/material are merged into existing entries.
-# On the Creator 5 HelixScreen keeps "T0".."T3"; an entry is found by its
-# "lane" field, so those are updated instead of adding laneN duplicates.
-# Zmod's slots are what is loaded, so an entry another writer leaves on a
-# different spool (HelixScreen rewrites them from Spoolman when it starts) is
-# corrected on the next recheck.
+# OrcaSlicer reads filament per slot from Moonraker's lane_data namespace.
+# Zmod writes it itself (lane1..laneN) unless HelixScreen manages lane_data
+# (save variable helix = 1). Then HelixScreen's entries ("lane1".."lane4" on
+# the AD5X, "T0".."T3" on the Creator 5, found by their "lane" field) are
+# merged with Zmod's slots: Zmod's slots are what is loaded, so an entry left
+# on a different spool (HelixScreen rewrites them from Spoolman when it
+# starts) is corrected on the next recheck. No entries are created.
 LANE_DATA_NAMESPACE = "lane_data"
 LANE_DATA_POLL = 2.0
 LANE_DATA_RETRY = 10.0
@@ -38,22 +37,13 @@ LANE_DATA_OWNER_KEYS = ("zmod_afcplus", "zmod_afclite")
 UNSET_MATERIALS = ("NONE", "N/A", "?", "")
 
 # Zmod's built-in AFC panel (zmod_afc, Zmod 1.7.5+) keeps a lane's Spoolman
-# spool and weight in save_variables as afc_spool_lane<N> / afc_weight_lane<N>.
-# zmod_afclite kept them per lane E0.. as below; they are copied over once.
+# spool in save_variables as afc_spool_lane<N>.
 AFC_SPOOL_VARIABLE = "afc_spool_lane"
-AFC_WEIGHT_VARIABLE = "afc_weight_lane"
-AFCLITE_VARIABLES = (
-    ("zmod_afclite_spool_e", AFC_SPOOL_VARIABLE),
-    ("zmod_afclite_weight_e", AFC_WEIGHT_VARIABLE),
-)
 
 # Spoolman is reached through Moonraker's [spoolman] proxy.
 SPOOLMAN_TIMEOUT = 30.0
 # A spool whose color could not be fetched is tried again after this long.
 SPOOLMAN_COLOR_RETRY = 60.0
-# Zmod briefly reports IFS slots as empty while it starts up, so a lane must
-# read empty this long before zmod_afc may clear its spool assignment.
-SPOOL_CLEAR_DELAY = 30.0
 
 
 def json_request(url, method, query=None, body=None, timeout=5):
@@ -196,6 +186,9 @@ class LaneDataSync:
             self._timer = None
 
     def _poll(self, eventtime):
+        if self.slots.variables().get("helix", 0) != 1:
+            # Zmod writes lane_data itself while HelixScreen does not.
+            return eventtime + LANE_DATA_RECHECK
         try:
             snapshot = self.slots.read(eventtime)
             palette = snapshot["palette"]
@@ -286,9 +279,7 @@ class LaneDataSync:
 
     def _lane_value(self, existing, zmod, palette):
         """The entry to store for one lane, starting from what is there."""
-        value = copy.deepcopy(existing) if isinstance(existing, dict) else {
-            LANE_DATA_OWNER_KEYS[0]: True,
-        }
+        value = copy.deepcopy(existing)
         value["lane"] = zmod["lane"]
         value.pop("zmod_afclite_color", None)  # from old zmod_afclite versions
         if not zmod["loaded"]:
@@ -339,14 +330,16 @@ class LaneDataSync:
                 # A duplicate made before the lane's other entry existed.
                 self._request("DELETE", {"namespace": LANE_DATA_NAMESPACE, "key": key})
             existing = current.get(target)
+            if not isinstance(existing, dict):
+                continue    # HelixScreen creates the lane's entry
             value = self._lane_value(existing, zmod, palette)
             if value != existing:
                 self._request("POST", body={
                     "namespace": LANE_DATA_NAMESPACE, "key": target, "value": value,
                 })
 
-        # Remove only entries this plugin created for slots that no longer
-        # exist (an IFS Jacker unit was removed); never other writers' lanes.
+        # Entries earlier versions created for slots that no longer exist (an
+        # IFS Jacker unit was removed); never other writers' lanes.
         for key, existing in current.items():
             if not self._owned(existing):
                 continue
@@ -366,31 +359,18 @@ class BuiltinAFC:
 
     def __init__(self, printer, slots, moonraker_url, config):
         self.printer = printer
-        self.reactor = printer.get_reactor()
         self.slots = slots
         self.proxy_url = moonraker_url.rstrip("/") + "/server/spoolman/proxy"
-        self.gcode = printer.lookup_object("gcode")
         self.idle_map = config.getboolean("toolchanger_idle_map", True)
         self.spool_colors = config.getboolean("spool_colors", True)
-        self.idle_sensors = config.getboolean("toolchanger_idle_sensors", True)
-        self.clear_delay = config.getfloat("spool_clear_delay", SPOOL_CLEAR_DELAY, minval=0.)
         self.afc = None
         self._lane_status = None
-        self._check_spools = None
-        self._load = None
-        # Per slot: True while it last read loaded, and since when it reads empty.
-        self._loaded = {}
-        self._empty_since = {}
         # Spoolman color ("RRGGBB" or None) per spool ID, and when a fetch is
         # running or last failed.
         self._colors = {}
         self._fetching = set()
         self._failed = {}
         self._warned = False
-        self.gcode.register_command(
-            "_AFCPLUS_LOAD", self.cmd_AFCPLUS_LOAD,
-            desc="Run zmod_afc's toolhead load, then Zmod's idle sensor setup",
-        )
 
     def attach(self):
         afc = self.printer.lookup_object("zmod_afc", None)
@@ -400,51 +380,14 @@ class BuiltinAFC:
         if not callable(getattr(afc, "_lane_status", None)):
             LOGGER.warning("Zmod AFC Plus: unknown zmod_afc version; AFC panel left as it is")
             return
+        if not hasattr(afc, "empty_since") or not hasattr(afc, "idle_load"):
+            # Lane spools lost at reboot, no head sensor reset after a load.
+            LOGGER.warning("Zmod AFC Plus: this Zmod's AFC panel is older than 1.7 of 2026-11-08; update Zmod")
         self.afc = afc
-        self._migrate_afclite()
         if self.idle_map or self.spool_colors:
             self._lane_status = afc._lane_status
             # zmod_afc's AFC_lane objects call self._lane_status on every query.
             afc._lane_status = self._wrapped_lane_status
-        # Zmod versions with empty_since wait for an empty slot themselves.
-        if (self.clear_delay and not hasattr(afc, "empty_since")
-                and callable(getattr(afc, "_check_spools", None))
-                and isinstance(getattr(afc, "prev_has", None), dict)
-                and isinstance(getattr(afc, "slots", None), dict)):
-            self._check_spools = afc._check_spools
-            afc._check_spools = self._wrapped_check_spools
-        if (self.slots.toolchanger and self.idle_sensors and isinstance(getattr(afc, "load", None), str)
-                and self.printer.lookup_object("gcode_macro _DISABLE_SENSOR", None) is not None):
-            self._load = afc.load
-            afc.load = "_AFCPLUS_LOAD SLOT={slot}"
-
-    def _migrate_afclite(self):
-        """Copy zmod_afclite's lane spools and weights to the built-in panel's
-        variables where it has none, then zero the old ones so a later clear
-        on the panel is not undone at the next start."""
-        variables = self.slots.variables()
-        lines = []
-        for key, value in sorted(variables.items()):
-            for old, new in AFCLITE_VARIABLES:
-                index = key[len(old):]
-                if not key.startswith(old) or not index.isdigit():
-                    continue
-                try:
-                    value = int(float(value))
-                except (TypeError, ValueError):
-                    continue
-                if value <= 0:
-                    continue
-                zmod_slot = int(index) + 1
-                target = f"{new}{zmod_slot}"
-                if not variables.get(target):
-                    lines.append(f"SAVE_VARIABLE VARIABLE={target} VALUE={value}")
-                    if new == AFC_SPOOL_VARIABLE and isinstance(getattr(self.afc, "spools", None), dict):
-                        self.afc.spools[zmod_slot] = value
-                    LOGGER.info("Zmod AFC Plus: %s=%d copied to %s", key, value, target)
-                lines.append(f"SAVE_VARIABLE VARIABLE={key} VALUE=0")
-        if lines:
-            self.gcode.run_script("\n".join(lines))
 
     def _wrapped_lane_status(self, eventtime, zmod_slot):
         status = self._lane_status(eventtime, zmod_slot)
@@ -460,28 +403,6 @@ class BuiltinAFC:
                 self._warned = True
                 LOGGER.exception("Zmod AFC Plus: lane status addition failed")
         return status
-
-    def _wrapped_check_spools(self):
-        """zmod_afc clears a lane's spool the first time a loaded slot reads
-        empty. Its last-seen presence (prev_has) is held at "empty" until the
-        slot has read empty for clear_delay seconds, so a slot that only
-        blinks empty (the IFS at boot) keeps its spool."""
-        now = self.reactor.monotonic()
-        prev_has = self.afc.prev_has
-        for zmod_slot in list(getattr(self.afc, "spools", None) or {}):
-            if (self.afc.slots.get(zmod_slot) or {}).get("hasFilament"):
-                self._loaded[zmod_slot] = True
-                self._empty_since.pop(zmod_slot, None)
-                continue
-            since = self._empty_since.setdefault(zmod_slot, now)
-            if self._loaded.get(zmod_slot) and now - since >= self.clear_delay:
-                self._loaded[zmod_slot] = False
-                prev_has[zmod_slot] = True  # zmod_afc now clears the spool
-            elif prev_has.get(zmod_slot):
-                prev_has[zmod_slot] = False
-                LOGGER.info("Zmod AFC Plus: lane%d reads empty, keeping its spool for %.0f s",
-                            zmod_slot, self.clear_delay)
-        self._check_spools()
 
     def _tool_map(self, eventtime, zmod_slot, mapped):
         """On a toolchanger each lane is its own toolhead between prints:
@@ -543,19 +464,6 @@ class BuiltinAFC:
         thread = threading.Thread(target=run, name="zmod_afcplus spoolman")
         thread.daemon = True
         thread.start()
-
-    def cmd_AFCPLUS_LOAD(self, gcmd):
-        """zmod_afc's configured toolhead load. Zmod's load ends on
-        _ENABLE_SENSOR, which leaves only the active head's filament sensor on
-        (its printing setup). When no print is running, _DISABLE_SENSOR puts
-        back the idle setup (all head sensors on), as Zmod's end of print does,
-        so inserting filament into any head still opens the color dialog."""
-        zmod_slot = gcmd.get_int("SLOT", minval=1)
-        if self._load is None:
-            raise gcmd.error("_AFCPLUS_LOAD is only used by Zmod's AFC panel on the Creator 5")
-        self.gcode.run_script_from_command(self._load.format(slot=zmod_slot, tool=zmod_slot - 1))
-        if not self.slots.printing(self.reactor.monotonic()):
-            self.gcode.run_script_from_command("_DISABLE_SENSOR")
 
 
 class ZmodAFCPlus:

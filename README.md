@@ -8,18 +8,24 @@ for the Flashforge AD5X and Creator 5 (Pro).
 Zmod 1.7.5 took over what [zmod_afclite](https://github.com/DIEHARDave/zmod_afclite)
 did: the AFC panel in Mainsail and Fluidd, SET_COLOR / SET_MATERIAL /
 SET_WEIGHT / SET_SPOOL_ID, the Spoolman active spool, IFS Jacker units, and the
-Creator 5 load. While updating, Zmod removes zmod_afclite. This plugin brings back the
-parts the built-in panel does not have. It registers no AFC objects or
-commands of its own, so it does not conflict with Zmod.
+Creator 5 load. While updating, Zmod removes zmod_afclite. Since 2026-11-08
+Zmod 1.7 also keeps lane spools through a reboot, resets the Creator 5 head
+sensors after an idle load (`idle_load`), migrates zmod_afclite's lane spools
+and weights, and writes lane_data itself while HelixScreen does not manage it.
+This plugin adds only what the built-in panel still does not have. It
+registers no AFC objects or commands of its own, so it does not conflict with
+Zmod. Keep Zmod up to date: with an older 1.7.5 build the plugin logs a
+warning, and lane spools are lost at every reboot.
 
 ## What it adds
 
-- **lane_data for OrcaSlicer.** Zmod's slot color and material are mirrored
-  into Moonraker's `lane_data` namespace, which OrcaSlicer's filament sync
-  reads. Existing entries are merged, not replaced: `lane1..lane4` on the AD5X
-  (HelixScreen's keys) and `T0..T3` on the Creator 5, found by their `lane`
-  field. Entries are rechecked every 15 s, and an entry that another writer
-  (HelixScreen, SpoolSync, FF_NFC) left on a different filament is corrected:
+- **lane_data for OrcaSlicer, with HelixScreen.** While HelixScreen manages
+  Moonraker's `lane_data` (Zmod's `helix = 1`, where Zmod writes none), its
+  entries are kept on Zmod's slots, which OrcaSlicer's filament sync reads:
+  `lane1..lane4` on the AD5X and `T0..T3` on the Creator 5, found by their
+  `lane` field. Entries are merged, never created. They are rechecked every
+  15 s, and one that another writer (HelixScreen, SpoolSync, FF_NFC) left on a
+  different filament is corrected:
   - An exact spool color is kept while it is the same Zmod color (on the
     Creator 5, the same palette entry).
   - An empty slot gets material `""`; its other fields stay.
@@ -38,18 +44,6 @@ commands of its own, so it does not conflict with Zmod.
   lane_data, so OrcaSlicer gets it too. That matters on the Creator 5, which
   keeps only a palette index per slot: an Ocean Blue `#C6EBEB` spool is
   stored as white `#FFFFFF`, but shown and synced as `#C6EBEB`.
-- **Lane spools survive a reboot.** The built-in panel clears a lane's
-  Spoolman spool as soon as the slot reads empty, and the AD5X IFS reports
-  slots empty for a while after boot, so assignments were lost on every
-  restart. A slot now has to read empty for 30 s before its spool is cleared.
-- **Creator 5 head sensors after a load.** Zmod's load leaves only the active
-  head's filament sensor on (its printing setup). After an AFC load with no
-  print running, `_DISABLE_SENSOR` puts back the idle setup, so inserting
-  filament into any head still opens the color dialog.
-- **Migration from zmod_afclite.** Lane spools and weights saved by
-  zmod_afclite (`zmod_afclite_spool_e0`.., `zmod_afclite_weight_e0`..) are
-  copied once to the built-in panel's `afc_spool_lane1`.. and
-  `afc_weight_lane1`.., for lanes that have none yet.
 
 Turn the panel on with `SAVE_ZMOD_DATA AFC=1` (Zmod turns it on itself when it
 replaces zmod_afclite). With the panel off, only lane_data is synced.
@@ -80,11 +74,9 @@ All options are on by default. To change one, add the section to
 
 ```ini
 [zmod_afcplus]
-lane_data: True                  # mirror slots into Moonraker lane_data
+lane_data: True                  # keep HelixScreen's lane_data on Zmod's slots
 toolchanger_idle_map: True       # Creator 5: own toolhead between prints
 spool_colors: True               # lanes show the Spoolman spool's color
-toolchanger_idle_sensors: True   # Creator 5: all head sensors on after an idle load
-spool_clear_delay: 30            # seconds empty before a lane's spool is cleared
 ```
 
 ## Notes
