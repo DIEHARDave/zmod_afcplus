@@ -176,6 +176,8 @@ class LaneDataSync:
         self._settled = 0
         self._slot_count = 0
         self._timer = None
+        # BuiltinAFC.spool_color, when spool_colors is on.
+        self.spool_color = None
         printer.register_event_handler("klippy:disconnect", self._handle_disconnect)
 
     def start(self):
@@ -196,21 +198,26 @@ class LaneDataSync:
     def _poll(self, eventtime):
         try:
             snapshot = self.slots.read(eventtime)
+            palette = snapshot["palette"]
             desired = {}
             for zmod_slot in range(1, snapshot["slot_count"] + 1):
                 slot = snapshot["slots"].get(zmod_slot)
                 if slot is None:
                     continue
                 material = str(slot.get("Material", "")).upper()
+                color = "#" + (bare_hex(slot.get("HEX")) or "FFFFFF")
+                spool_id = self.slots.spool_id(zmod_slot)
                 desired[f"lane{zmod_slot}"] = {
                     "lane": str(zmod_slot - 1),
-                    "color": "#" + (bare_hex(slot.get("HEX")) or "FFFFFF"),
+                    "color": color,
+                    # The lane spool's exact color, for OrcaSlicer, where
+                    # Zmod could only store a palette entry close to it.
+                    "spool_color": self.spool_color(spool_id, color, palette) if self.spool_color else None,
                     "material": None if material in UNSET_MATERIALS else material,
                     # Without presence data a slot counts as loaded.
                     "loaded": bool(slot.get("hasFilament")) or not snapshot["presence_known"],
-                    "spool_id": self.slots.spool_id(zmod_slot),
+                    "spool_id": spool_id,
                 }
-            palette = snapshot["palette"]
             reading = (desired, palette)
             if reading != self._reading:
                 self._reading = reading
@@ -296,6 +303,9 @@ class LaneDataSync:
             if not self._same_zmod_color(value.get("color"), zmod["color"], palette):
                 value["color"] = zmod["color"]
                 same_spool = False
+            spool_color = zmod.get("spool_color")
+            if spool_color and bare_hex(value.get("color")) != spool_color:
+                value["color"] = f"#{spool_color}"
         if zmod["material"] is not None and not value.get("helix_locked_material"):
             material = str(value.get("material") or "").upper()
             if material != zmod["material"]:
@@ -487,9 +497,15 @@ class BuiltinAFC:
         return [] if zmod_slot - 1 < len(tool_map) else [own_tool]
 
     def _spool_color(self, zmod_slot, color):
-        """The lane spool's own Spoolman color while Zmod stores it as the
-        slot's color (on the Creator 5, the same palette entry)."""
         spool_id = (getattr(self.afc, "spools", None) or {}).get(zmod_slot)
+        palette = [c for c in (bare_hex(e) for e in getattr(self.afc, "palette", None) or []) if c]
+        spool_color = self.spool_color(spool_id, color, palette)
+        return f"#{spool_color}" if spool_color else None
+
+    def spool_color(self, spool_id, color, palette):
+        """The spool's own Spoolman color ("RRGGBB") while Zmod stores it as
+        the slot's color (on the Creator 5, the same palette entry), else
+        None. The first call for a spool starts fetching its color."""
         slot_color = bare_hex(color)
         if not spool_id or not slot_color:
             return None
@@ -497,9 +513,8 @@ class BuiltinAFC:
             self._fetch_color(spool_id)
             return None
         spool_color = self._colors[spool_id]
-        palette = [c for c in (bare_hex(e) for e in getattr(self.afc, "palette", None) or []) if c]
         if spool_color and self.slots.snap(spool_color, palette) == slot_color:
-            return f"#{spool_color}"
+            return spool_color
         return None
 
     def _fetch_color(self, spool_id):
@@ -552,6 +567,8 @@ class ZmodAFCPlus:
         if config.getboolean("lane_data", True):
             self.lane_data = LaneDataSync(self.printer, self.slots, moonraker_url)
         self.builtin = BuiltinAFC(self.printer, self.slots, moonraker_url, config)
+        if self.lane_data is not None and self.builtin.spool_colors:
+            self.lane_data.spool_color = self.builtin.spool_color
         self.printer.register_event_handler("klippy:ready", self._handle_ready)
 
     def _handle_ready(self):

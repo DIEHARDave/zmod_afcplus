@@ -34,8 +34,10 @@ commands of its own, so it does not conflict with Zmod.
   maps to its own toolhead. During a print, a lane the mapping leaves out
   serves its own toolhead, unless that tool is mapped to another lane.
 - **Spoolman colors on lanes.** A lane with a Spoolman spool shows the spool's
-  own color while Zmod stores it as the slot color. That matters on the
-  Creator 5, which keeps only a palette index per slot.
+  own color while Zmod stores it as the slot color, on the AFC panel and in
+  lane_data, so OrcaSlicer gets it too. That matters on the Creator 5, which
+  keeps only a palette index per slot: an Ocean Blue `#C6EBEB` spool is
+  stored as white `#FFFFFF`, but shown and synced as `#C6EBEB`.
 - **Lane spools survive a reboot.** The built-in panel clears a lane's
   Spoolman spool as soon as the slot reads empty, and the AD5X IFS reports
   slots empty for a while after boot, so assignments were lost on every
