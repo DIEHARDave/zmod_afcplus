@@ -396,7 +396,9 @@ class BuiltinAFC:
             self._lane_status = afc._lane_status
             # zmod_afc's AFC_lane objects call self._lane_status on every query.
             afc._lane_status = self._wrapped_lane_status
-        if (self.clear_delay and callable(getattr(afc, "_check_spools", None))
+        # Zmod versions with empty_since wait for an empty slot themselves.
+        if (self.clear_delay and not hasattr(afc, "empty_since")
+                and callable(getattr(afc, "_check_spools", None))
                 and isinstance(getattr(afc, "prev_has", None), dict)
                 and isinstance(getattr(afc, "slots", None), dict)):
             self._check_spools = afc._check_spools
