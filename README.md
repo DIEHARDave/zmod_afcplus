@@ -34,16 +34,20 @@ warning, and lane spools are lost at every reboot.
     on that lane.
   - Slot reads must agree for 3 polls, because the IFS reports every slot
     empty for a few seconds after boot.
-- **Creator 5 lane map between prints.** Zmod's `file.json` keeps the last
-  print's tool mapping, so the panel (and HelixScreen, which reads the AFC
-  map) showed lanes on the wrong tools when idle. Between prints each lane now
-  maps to its own toolhead. During a print, a lane the mapping leaves out
-  serves its own toolhead, unless that tool is mapped to another lane.
+- **Creator 5 lane map between prints**, on Zmod builds without the
+  `[zmod_afc] idle_map` option. Zmod's `file.json` keeps the last print's tool
+  mapping, so the panel (and HelixScreen, which reads the AFC map) showed
+  lanes on the wrong tools when idle. Between prints each lane maps to its own
+  toolhead. During a print, a lane the mapping leaves out serves its own
+  toolhead, unless that tool is mapped to another lane. Zmod with `idle_map`
+  resets `file.json` itself when a print ends, and then this part stays off.
 - **Spoolman colors on lanes.** A lane with a Spoolman spool shows the spool's
   own color while Zmod stores it as the slot color, on the AFC panel and in
   lane_data, so OrcaSlicer gets it too. That matters on the Creator 5, which
   keeps only a palette index per slot: an Ocean Blue `#C6EBEB` spool is
-  stored as white `#FFFFFF`, but shown and synced as `#C6EBEB`.
+  stored as white `#FFFFFF`, but shown and synced as `#C6EBEB`. The color
+  comes from Zmod's `zmod_afc` where it keeps it (Zmod 1.7 of 2026-11-08 and
+  later), else from Spoolman.
 
 Turn the panel on with `SAVE_ZMOD_DATA AFC=1` (Zmod turns it on itself when it
 replaces zmod_afclite). With the panel off, only lane_data is synced.

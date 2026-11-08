@@ -205,7 +205,7 @@ class LaneDataSync:
                     "color": color,
                     # The lane spool's exact color, for OrcaSlicer, where
                     # Zmod could only store a palette entry close to it.
-                    "spool_color": self.spool_color(spool_id, color, palette) if self.spool_color else None,
+                    "spool_color": self.spool_color(zmod_slot, spool_id, color, palette) if self.spool_color else None,
                     "material": None if material in UNSET_MATERIALS else material,
                     # Without presence data a slot counts as loaded.
                     "loaded": bool(slot.get("hasFilament")) or not snapshot["presence_known"],
@@ -384,6 +384,9 @@ class BuiltinAFC:
             # Lane spools lost at reboot, no head sensor reset after a load.
             LOGGER.warning("Zmod AFC Plus: this Zmod's AFC panel is older than 1.7 of 2026-11-08; update Zmod")
         self.afc = afc
+        if hasattr(afc, "idle_map"):
+            # Zmod resets file.json to one lane per tool when a print ends.
+            self.idle_map = False
         if self.idle_map or self.spool_colors:
             self._lane_status = afc._lane_status
             # zmod_afc's AFC_lane objects call self._lane_status on every query.
@@ -420,16 +423,19 @@ class BuiltinAFC:
     def _spool_color(self, zmod_slot, color):
         spool_id = (getattr(self.afc, "spools", None) or {}).get(zmod_slot)
         palette = [c for c in (bare_hex(e) for e in getattr(self.afc, "palette", None) or []) if c]
-        spool_color = self.spool_color(spool_id, color, palette)
+        spool_color = self.spool_color(zmod_slot, spool_id, color, palette)
         return f"#{spool_color}" if spool_color else None
 
-    def spool_color(self, spool_id, color, palette):
+    def spool_color(self, zmod_slot, spool_id, color, palette):
         """The spool's own Spoolman color ("RRGGBB") while Zmod stores it as
         the slot's color (on the Creator 5, the same palette entry), else
-        None. The first call for a spool starts fetching its color."""
+        None. Zmod versions whose zmod_afc keeps it are asked; otherwise the
+        first call for a spool starts fetching its color."""
         slot_color = bare_hex(color)
         if not spool_id or not slot_color:
             return None
+        if callable(getattr(self.afc, "spool_color", None)):
+            return bare_hex(self.afc.spool_color(zmod_slot, slot_color)) or None
         if spool_id not in self._colors:
             self._fetch_color(spool_id)
             return None
